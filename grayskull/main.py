@@ -432,14 +432,20 @@ def create_python_recipe(pkg_name, sections_populate=None, **kwargs):
 
 
 def generate_r_recipes_from_list(list_pkgs, args):
-    cran_label = " (cran)"
     for pkg_name in list_pkgs:
         logging.debug(f"Starting grayskull for pkg: {pkg_name}")
         from_local_sdist = origin_is_local_sdist(pkg_name)
+        
+        # Determine the label based on package source
+        if origin_is_github(pkg_name):
+            r_label = " (github)"
+        else:
+            r_label = " (cran)"
+            
         print_msg(
             f"{Fore.GREEN}\n\n"
             f"#### Initializing recipe for "
-            f"{Fore.BLUE}{pkg_name}{cran_label} {Fore.GREEN}####\n"
+            f"{Fore.BLUE}{pkg_name}{r_label} {Fore.GREEN}####\n"
         )
         if Path(pkg_name).is_file() and (not from_local_sdist):
             args.output = pkg_name

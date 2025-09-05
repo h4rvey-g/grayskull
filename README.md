@@ -21,7 +21,7 @@ The main goal of this project is to generate concise recipes
 for [conda-forge](https://conda-forge.org/).
 The Grayskull project was created with the intention to eventually replace `conda skeleton`. <br>
 Presently Grayskull can generate recipes for Python packages available on PyPI and also those not published on PyPI but available as GitHub repositories.
-Grayskull can also generate recipes for R packages published on CRAN.
+Grayskull can also generate recipes for R packages published on CRAN and those available as GitHub repositories.
 Future versions of Grayskull will support recipe generation for packages of other repositories such as Conan and CPAN etc.
 
 ## Installation
@@ -75,6 +75,22 @@ grayskull pypi ./pytest-5.3.5.tar.gz
 
 Note that such a recipe isn't really portable as it will depend on the local path of the
 sdist file. It can be useful if you want to automatically generate a conda package.
+
+### R packages from GitHub
+
+Grayskull can also generate recipes for R packages that are not published on CRAN but are available on GitHub repositories. Simply provide the GitHub URL instead of the package name:
+
+```bash
+grayskull cran https://github.com/tidyverse/stringr
+```
+
+This will:
+- Download the R package source from GitHub
+- Extract metadata from the DESCRIPTION file
+- Generate a conda recipe with appropriate R dependencies
+- Handle compilation requirements if the package needs them
+
+The generated recipe will use the GitHub repository as the source and include proper version handling based on GitHub releases or tags.
 
 ### Use Grayskull with an internal package index
 

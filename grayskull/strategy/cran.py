@@ -15,11 +15,12 @@ import requests
 from bs4 import BeautifulSoup
 from souschef.jinja_expression import set_global_jinja_var
 
+from grayskull.base.github import generate_git_archive_tarball_url, handle_gh_version
 from grayskull.cli.stdout import print_msg
 from grayskull.config import Configuration
 from grayskull.license.discovery import match_license
 from grayskull.strategy.abstract_strategy import AbstractStrategy
-from grayskull.utils import sha256_checksum
+from grayskull.utils import origin_is_github, sha256_checksum
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +45,16 @@ class CranStrategy(AbstractStrategy):
 
     @staticmethod
     def fetch_data(recipe, config, sections=None):
-        metadata, r_recipe_end_comment = get_cran_metadata(
-            config, CranStrategy.CRAN_URL
-        )
+        # Check if the package name is a GitHub URL - use repo_github if available 
+        # since Configuration.__post_init__ processes GitHub URLs
+        is_github_package = (config.repo_github and origin_is_github(config.repo_github)) or origin_is_github(config.name)
+        
+        if is_github_package:
+            metadata, r_recipe_end_comment = get_github_r_metadata(config)
+        else:
+            metadata, r_recipe_end_comment = get_cran_metadata(
+                config, CranStrategy.CRAN_URL
+            )
         sections = sections or ALL_SECTIONS
 
         for sec in sections:
@@ -355,6 +363,133 @@ def download_cran_pkg(config, pkg_url):
     response.raise_for_status()
     download_file = os.path.join(
         str(mkdtemp(f"grayskull-cran-metadata-{config.name}-")), tarball_name
+    )
+    with open(download_file, "wb") as f:
+        f.write(response.content)
+    return download_file
+
+
+def get_github_r_metadata(config: Configuration):
+    """Method responsible for getting R package metadata from GitHub.
+    :param config: Configuration object containing GitHub URL
+    :return: R package metadata and recipe end comment
+    """
+    # Get the GitHub URL - it should be in repo_github after Configuration.__post_init__ processing
+    github_url = config.repo_github or config.name
+    pkg_name = config.name
+    
+    # Remove r- prefix if present in the package name
+    if pkg_name.startswith("r-"):
+        pkg_name = pkg_name[2:]
+    
+    print_msg(f"Fetching R package metadata from GitHub: {github_url}")
+    
+    # Handle version and tag using existing GitHub utilities
+    version, version_tag = handle_gh_version(
+        name=pkg_name, version=config.version, url=github_url, tag=None
+    )
+    
+    # Generate archive URL
+    archive_url = generate_git_archive_tarball_url(git_url=github_url, git_ref=version_tag)
+    print_msg(f"Archive URL: {archive_url}")
+    
+    # Download the archive
+    download_file = download_github_r_pkg(config, archive_url, pkg_name, version_tag)
+    
+    # Extract metadata from DESCRIPTION file
+    metadata = get_archive_metadata(download_file)
+    
+    r_recipe_end_comment = "\n".join(
+        [f"# {line}" for line in metadata["orig_lines"] if line]
+    )
+    
+    print_msg(r_recipe_end_comment)
+    
+    imports = []
+    # Extract 'imports' from metadata.
+    # Imports is equivalent to run and host dependencies.
+    # Add 'r-' suffix to all packages listed in imports.
+    for s in metadata.get("Imports", "").split(","):
+        if not s.strip():
+            continue
+        r = s.split("(")
+        if len(r) == 1:
+            imports.append(f"r-{r[0].strip()}")
+        else:
+            constrain = r[1].strip().replace(")", "").replace(" ", "")
+            imports.append(f"r-{r[0].strip()} {constrain.strip()}")
+
+    # Every R package will always depend on the R base package.
+    # Hence, the 'r-base' package is always present
+    # in the host and run requirements.
+    imports.append("r-base")
+    imports.sort()  # this is not a requirement in conda but good for readability
+
+    dict_metadata = {
+        "package": {
+            "name": "r-{{ name }}",
+            "version": "{{ version }}",
+        },
+        "source": {
+            "url": archive_url.replace(version_tag, "{{ version }}"),
+            "sha256": sha256_checksum(download_file),
+        },
+        "build": {
+            "number": 0,
+            "merge_build_host": True,
+            "script": "R CMD INSTALL --build .",
+            "entry_points": metadata.get("entry_points"),
+            "rpaths": ["lib/R/lib/", "lib/"],
+        },
+        "requirements": {
+            "build": [],
+            "host": deepcopy(imports),
+            "run": deepcopy(imports),
+        },
+        "test": {
+            "imports": metadata.get("tests"),
+            "commands": [
+                f"$R -e \"library('{pkg_name}')\"  # [not win]",
+                f'"%R%" -e "library(\'{pkg_name}\')"  # [win]',
+            ],
+        },
+        "about": {
+            "home": github_url,
+            "summary": metadata.get("Description"),
+            "doc_url": metadata.get("doc_url"),
+            "dev_url": github_url,
+            "license": match_license(metadata.get("License", "")).get("licenseId")
+            or metadata.get("License", ""),
+        },
+    }
+    
+    if metadata.get("NeedsCompilation", "no").lower() == "yes":
+        dict_metadata["need_compiler"] = True
+        dict_metadata["requirements"]["build"].extend(
+            [
+                "cross-r-base {{ r_base }}  # [build_platform != target_platform]",
+                "autoconf  # [unix]",
+                "{{ compiler('c') }}  # [unix]",
+                "{{ compiler('m2w64_c') }}  # [win]",
+                "{{ compiler('cxx') }}  # [unix]",
+                "{{ compiler('m2w64_cxx') }}  # [win]",
+                "posix  # [win]",
+            ]
+        )
+    if not dict_metadata["requirements"]["build"]:
+        del dict_metadata["requirements"]["build"]
+    
+    return dict_metadata, r_recipe_end_comment
+
+
+def download_github_r_pkg(config, archive_url, pkg_name, version_tag):
+    """Download R package archive from GitHub"""
+    tarball_name = f"{pkg_name}-{version_tag}.tar.gz"
+    print_msg(f"Downloading from: {archive_url}")
+    response = requests.get(archive_url)
+    response.raise_for_status()
+    download_file = os.path.join(
+        str(mkdtemp(f"grayskull-github-r-metadata-{pkg_name}-")), tarball_name
     )
     with open(download_file, "wb") as f:
         f.write(response.content)
